@@ -1,0 +1,27 @@
+services:
+  mongo:
+    image: mongo:7
+    # A replica set is required for j:true / w:majority semantics and transactions.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ./docker/init-replica-set.js:/init-replica-set.js:ro
+    command: ["mongosh", "--host", "mongo", "--quiet", "--file", "/init-replica-set.js"]
+    restart: "no"
+
+volumes:
+  mongo-data:
