@@ -3,20 +3,25 @@
 NestJS + TypeScript + MongoDB service that accepts patient events over HTTP, acknowledges them
 immediately and processes them asynchronously (each event calls a ~5s external system).
 
-> Generic README — to be reviewed and personalised before delivery.
-
 ## Running locally
 
 ```bash
-docker-compose up -d     # MongoDB as a single-node replica set, initiated automatically
+docker compose up --build   # MongoDB (single-node replica set, initiated automatically) + the app
+                            # -> http://localhost:3000
+```
+
+For development with hot reload, run only the database in Docker:
+
+```bash
+docker compose up -d mongo mongo-init
 npm install
-npm run start:dev        # http://localhost:3000
+npm run start:dev           # http://localhost:3000
 ```
 
 | Command | What it does |
 | --- | --- |
 | `npm test` | Unit tests (fold, semaphore) — no database needed |
-| `npm run test:e2e` | Integration tests — need the Mongo from `docker-compose` |
+| `npm run test:e2e` | Integration tests — need the Mongo from `docker compose up -d mongo mongo-init` |
 | `npm run load-test` | 1000 events/min for 60s with duplicates, out-of-order timestamps and invalid payloads; waits for the queue to drain and checks nothing was lost or double-stored |
 
 Everything is tunable through environment variables, see [`.env.example`](.env.example).
@@ -30,20 +35,30 @@ Everything is tunable through environment variables, see [`.env.example`](.env.e
 
 ## Architecture
 
-```
-            POST /events
-                 │ validate shape
-                 ▼
-   ┌──────────────────────────┐   insert (w:majority, j:true) → 202
-   │ events  (source of truth)│◄───────────────────────────────────┐
-   └──────────────────────────┘                                    │
-        ▲   │ 1. find patients with due events                     │ reaper: expired
-        │   ▼ 2. claim patient (atomic upsert + lease)             │ leases → pending
-   ┌──────────────────────────┐                                    │
-   │ patients (derived state) │  3. take ≤ MAX_BATCH oldest events─┘
-   └──────────────────────────┘  4. external calls in parallel (global semaphore)
-        ▲                        5. refold ALL processed events + this batch
-        └─ 6. save state if version unchanged, then mark events processed
+```mermaid
+flowchart TD
+    client([Sender]) -->|POST /events| validate{Valid shape?}
+    validate -->|no| invalid[(events: status invalid)]
+    validate -->|yes| insert[(events: status pending)]
+    insert -->|"insert with w:majority, j:true"| accepted([202 Accepted + event id])
+    invalid -->|stored, not dropped| rejected([422 + event id + errors])
+
+    subgraph worker [Worker: single process, ~100 slots]
+        find["1. Find patients with due events"] --> claim["2. Claim patient: atomic upsert + lease"]
+        claim --> take["3. Take up to MAX_BATCH oldest events, mark processing"]
+        take --> ext["4. External calls in parallel via Promise.allSettled, global semaphore"]
+        ext -->|fulfilled| fold["5. Refold ALL processed events + this batch"]
+        ext -->|rejected| retry["attempts + 1: back to pending with backoff, or failed"]
+        fold --> save["6. Save state if version unchanged, then mark events processed"]
+        take -.->|heartbeat extends lease| claim
+    end
+
+    insert --> find
+    save --> patients[("patients: derived state, version, lease")]
+    claim --- patients
+    take --- insert
+    retry --> insert
+    reaper["Reaper: expired leases back to pending"] -.-> insert
 ```
 
 Two collections, by design:
@@ -115,4 +130,4 @@ for all three. Unknown types and malformed `data` are stored and skipped by the 
   for low-cardinality workloads.
 - Replay/inspection tooling for `failed` events; a dead-letter view.
 - Metrics, tracing and alerting (lag, oldest pending age, reaper activity); readiness/liveness probes.
-- A Dockerfile for the app, and a chaos test that kills the process mid-batch.
+- A chaos test that kills the process mid-batch.

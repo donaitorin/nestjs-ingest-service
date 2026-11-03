@@ -23,5 +23,19 @@ services:
     command: ["mongosh", "--host", "mongo", "--quiet", "--file", "/init-replica-set.js"]
     restart: "no"
 
+  app:
+    build: .
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    environment:
+      # Inside the compose network the database is "mongo"; directConnection skips replica-set
+      # discovery, which would hand back the member host "localhost:27017" set by the init script.
+      MONGO_URI: mongodb://mongo:27017/?directConnection=true
+    # Gives the worker time to drain in-flight batches (~5s each) after SIGTERM.
+    stop_grace_period: 30s
+
 volumes:
   mongo-data:
