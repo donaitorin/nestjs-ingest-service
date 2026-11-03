@@ -5,26 +5,51 @@ immediately and processes them asynchronously (each event calls a ~5s external s
 
 ## Running locally
 
+Requirements: Docker. Nothing else is needed to run the service.
+
 ```bash
-docker compose up --build   # MongoDB (single-node replica set, initiated automatically) + the app
-                            # -> http://localhost:3000
+docker compose up --build
 ```
 
-For development with hot reload, run only the database in Docker:
+This starts MongoDB as a single-node replica set (initiated automatically), then the app on
+http://localhost:3000. Stop it with `Ctrl+C` or `docker compose down` (add `-v` to also wipe the data).
+
+Try it:
+
+```bash
+curl -i -X POST localhost:3000/events -H 'content-type: application/json' \
+  -d '{"patientId":"p1","type":"vitals.recorded","data":{"heartRate":72},"ts":"2024-01-01T10:00:00Z"}'
+curl localhost:3000/events/stats
+```
+
+Settings are environment variables (defaults in [`.env.example`](.env.example)). To change one
+for the containerised app, add it under `app.environment` in `docker-compose.yml`, e.g.
+`EXTERNAL_DELAY_MS: 1000`.
+
+### Tests and load test (optional, require Node 24 on the host)
+
+The test suites and the load generator run on the host against the dockerised stack:
+
+```bash
+npm install
+npm test                    # unit tests (fold, semaphore) — no database needed
+docker compose up -d mongo mongo-init
+npm run test:e2e            # integration tests — need the Mongo from the line above
+docker compose up -d        # make sure the app is up, then:
+npm run load-test           # 1000 events/min for 60s with duplicates, out-of-order timestamps
+                            # and invalid payloads; waits for the queue to drain and checks that
+                            # nothing was lost or double-stored
+```
+
+### Local development (optional)
+
+For hot reload, run only the database in Docker and the app on the host (stop the `app` container
+first, it uses the same port):
 
 ```bash
 docker compose up -d mongo mongo-init
-npm install
 npm run start:dev           # http://localhost:3000
 ```
-
-| Command | What it does |
-| --- | --- |
-| `npm test` | Unit tests (fold, semaphore) — no database needed |
-| `npm run test:e2e` | Integration tests — need the Mongo from `docker compose up -d mongo mongo-init` |
-| `npm run load-test` | 1000 events/min for 60s with duplicates, out-of-order timestamps and invalid payloads; waits for the queue to drain and checks nothing was lost or double-stored |
-
-Everything is tunable through environment variables, see [`.env.example`](.env.example).
 
 ### API
 
